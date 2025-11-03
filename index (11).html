@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>スマートフォン姿勢判定（1）</title>
+  <style>
+    :root { --w: 240px; --h: 320px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans JP", "Apple Color Emoji", "Segoe UI Emoji";
+      font-size: 18px; margin: 0; color: #111; background: #fafafa; }
+    header { padding: 12px 16px; background: #fff; border-bottom: 1px solid #eee; position: sticky; top: 0; z-index: 10; }
+    h1 { font-size: 20px; margin: 0; }
+    main { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 12px; place-items: center; }
+    .stage { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+    .pair { display: flex; gap: 8px; align-items: center; justify-content: center; flex-direction: row; }
+    video, canvas { transform: scaleX(-1); width: var(--w); height: var(--h);
+      border: 1px solid #ddd; background: #000; border-radius: 6px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+    button { font-size: 15px; padding: 8px 14px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+    button.primary { background: #0ea5e9; color: #fff; border-color: #0ea5e9; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .panel { width: min(680px, 92vw); background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 12px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-line; }
+    #warning { font-size: 24px; font-weight: 800; text-align: center; margin: 4px 0 0; }
+    .ok { color: #16a34a; } .bad { color: #dc2626; }
+    .hint { color: #666; font-size: 13px; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#f1f5f9; font-size:12px; }
+    @media (max-width: 760px) { .pair { flex-direction: column; flex-wrap: nowrap; } }
+    #canvas { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>スマートフォン姿勢判定 <span class="badge">3</span></h1>
+  </header>
+
+  <main>
+    <section class="stage">
+      <div class="controls">
+        <button id="startBtn" class="primary">測定開始</button>
+        <button id="calibBtn" disabled>正しい姿勢の基準</button>
+        <button id="resetBtn" disabled>解除</button>
+      </div>
+      <div class="pair">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div id="warning" class="ok">測定待機中</div>
+      <div class="row">
+        <div>
+          <h3>現在値</h3>
+          <div id="output" class="mono">読み取り中...</div>
+        </div>
+      </div>
+      <p class="hint">使い方：<strong>測定開始</strong> → 個人差が出る場合は正しい姿勢で <strong>基準ボタン</strong> → 不要なら <strong>解除</strong>。iOS は開始時にセンサー許可が必要です。</p>
+
+      <!-- ▼ ログ操作＆可視化UI ▼ -->
+      <div class="controls" style="margin-top:6px">
+        <button id="logStartBtn">ログ開始</button>
+        <button id="logStopBtn" disabled>ログ停止</button>
+        <button id="exportCsvBtn">CSVエクスポート</button>
+        <button id="clearLogBtn">ログ全削除</button>
+      </div>
+
+      <div class="row" style="margin-top:8px">
+        <div>
+          <h3>可視化（時間帯ごと）</h3>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+            <label class="hint">日付:
+              <input type="date" id="vizDate">
+            </label>
+            <label class="hint">対象: 
+              <select id="vizRange">
+                <option value="day" selected>1日</option>
+                <option value="week">直近7日</option>
+              </select>
+            </label>
+            <button id="vizBtn">更新</button>
+          </div>
+          <canvas id="chart" width="640" height="220" style="width:100%; max-width:680px; background:#fff; border:1px solid #eee; border-radius:8px; margin-top:6px"></canvas>
+          <div class="hint">バー高さ=前傾割合（%）。棒をタップで時間帯の%を表示。</div>
+        </div>
+      </div>
+      <!-- ▲ ログ操作＆可視化UI ▲ -->
+    </section>
+  </main>
+
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    // ========== 設定/状態 ==========
+    const PARAMS = {
+      alphaPitch: 0.25, alphaRoll: 0.25, alphaYdiff: 0.3, alphaNoseZ: 0.25,
+      calibYdiff: null, calibNoseZ: null,
+      // 既存しきい値（距離・ヒステリシス等で使用）
+      absExitBand: 0.02,
+      closeEnter: -0.035, closeExit: -0.015, farEnter: 0.020, farExit: 0.005,
+      absCloseEnter: -0.15, absFarEnter: -0.10, absZExitBand: 0.02,
+      sustainMs: 10, clearMs: 10,
+      // ★ 追加：警告音設定
+      beep: { intervalMs: 500, freq: 880, dur: 0.3, gain: 0.08 },
+    };
+
+    const video  = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx    = canvas.getContext('2d');
+    const output = document.getElementById('output');
+    const warning= document.getElementById('warning');
+    const startBtn = document.getElementById('startBtn');
+    const calibBtn = document.getElementById('calibBtn');
+    const resetBtn = document.getElementById('resetBtn');
+
+    let rawPitch=0, rawRoll=0;
+    let sPitch=0, sRoll=0, sYdiff=null, sNoseZ=null;
+    let faceState = { dir: 'straight', prox: '通常距離' };
+    let bentState = false;
+    let enterStart = null, exitStart  = null;
+    let wasDown = false, wasUp = false, wasClose = false, wasFar = false;
+
+    // UI最適化
+    let lastWarnText = null, lastWarnBad = null;
+    let camera = null;
+    let lastInferenceTs = 0; // FPS制限
+
+    // ★ 追加：顔検出フラグ
+    let faceDetected = false;
+
+    // ======== 警告音（Web Audio） ========
+    let audioCtx = null;
+    let beepInterval = null;
+
+    function ensureAudio() {
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume?.();
+        }
+      } catch (e) {
+        console.warn('AudioContext 初期化に失敗:', e);
+        audioCtx = null;
+      }
+    }
+
+    function playBeep() {
+      if (!audioCtx) return;
+      const { freq, dur, gain } = PARAMS.beep;
+      const osc = audioCtx.createOscillator();
+      const g   = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+      g.gain.setValueAtTime(gain, audioCtx.currentTime);
+      osc.connect(g).connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + dur);
+      osc.onended = () => { try { osc.disconnect(); g.disconnect(); } catch {} };
+    }
+
+    function startBeepLoop() {
+      if (beepInterval) return;
+      playBeep(); // 入りで1回
+      beepInterval = setInterval(playBeep, PARAMS.beep.intervalMs);
+    }
+
+    function stopBeepLoop() {
+      if (beepInterval) { clearInterval(beepInterval); beepInterval = null; }
+    }
+
+    // ========== センサー ==========
+    function handleOrientation(e){
+      rawPitch = (e.beta  ?? 0);
+      rawRoll  = (e.gamma ?? 0);
+      sPitch = PARAMS.alphaPitch * rawPitch + (1 - PARAMS.alphaPitch) * sPitch;
+      sRoll  = PARAMS.alphaRoll  * rawRoll  + (1 - PARAMS.alphaRoll ) * sRoll;
+    }
+
+    // ========== FaceMesh ==========
+    const faceMesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
+    faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: false, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+    faceMesh.onResults(results => {
+      // FPS制限（10fps）
+      const now = performance.now();
+      if (now - lastInferenceTs < 100) return;
+      lastInferenceTs = now;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+      if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+        faceDetected = false; // ★ 顔なし
+        setWarning(true, '顔が検出できません');
+        output.textContent = '顔が見つかりません';
+        return;
+      }
+      faceDetected = true; // ★ 顔あり
+
+      const lm = results.multiFaceLandmarks[0];
+      const nose = lm[1];
+      const chin = lm[152];
+
+      drawPoint(nose, '#22c55e');
+      drawPoint(chin, '#2563eb');
+
+      const yDiff = (chin.y - nose.y);
+      const noseZ = nose.z;
+
+      sYdiff = (sYdiff == null) ? yDiff : PARAMS.alphaYdiff * yDiff + (1 - PARAMS.alphaYdiff) * sYdiff;
+      sNoseZ = (sNoseZ == null) ? noseZ : PARAMS.alphaNoseZ * noseZ + (1 - PARAMS.alphaNoseZ) * sNoseZ;
+
+      // 顔向き & 距離の分類
+      const dir = classifyDirection();     // ← combined 判定
+      faceState.dir = dir;
+      const prox = classifyProximity(sNoseZ);
+      faceState.prox = prox;
+
+      // スマホ角度も考慮した首曲がり最終判定
+      const pitchAbs = Math.abs(sPitch);
+      const isBentNow = isBent(faceState.dir, faceState.prox, pitchAbs);
+      updateSustain(isBentNow); // ★ 表示更新はこの中で毎フレーム同期
+
+      // デバッグ出力
+      const combined = getCombinedForDebug();
+      output.textContent =
+        `Pitch: ${sPitch.toFixed(2)}°\n` +
+        `Roll:  ${sRoll.toFixed(2)}°\n` +
+        `yDiff(平滑): ${sYdiff.toFixed(4)}\n` +
+        `noseZ(平滑): ${sNoseZ.toFixed(4)}\n` +
+        `combined(y+z): ${combined.toFixed(4)}\n` +
+        `顔向き: ${faceState.dir}\n` +
+        `顔距離: ${faceState.prox}`;
+
+      // ログ記録（1秒粒度）
+      addLogSample();
+    });
+
+    function drawPoint(normLandmark, color) {
+      const x = normLandmark.x * canvas.width;
+      const y = normLandmark.y * canvas.height;
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    }
+
+    // === combined(y+z) を返す（キャリブ有無に対応）
+    function getCombinedForDebug(){
+      if (PARAMS.calibYdiff != null && PARAMS.calibNoseZ != null){
+        return (sYdiff - PARAMS.calibYdiff) + (sNoseZ - PARAMS.calibNoseZ);
+      }
+      return (sYdiff ?? 0) + (sNoseZ ?? 0);
+    }
+
+    // ★ 顔向き：yDiff + noseZ で判定（ヒステリシス）
+    function classifyDirection() {
+      const band = PARAMS.absExitBand ?? 0.02;
+      let combined;
+
+      if (PARAMS.calibYdiff != null && PARAMS.calibNoseZ != null){
+        combined = (sYdiff - PARAMS.calibYdiff) + (sNoseZ - PARAMS.calibNoseZ);
+      } else {
+        combined = (sYdiff ?? 0) + (sNoseZ ?? 0);
+      }
+
+      if (!wasDown && combined < -0.04) { wasDown = true; wasUp = false; return 'down'; }
+      if (wasDown && combined > -0.04 + band) { wasDown = false; }
+
+      if (!wasUp && combined > 0.05) { wasUp = true; wasDown = false; return 'up'; }
+      if (wasUp && combined < 0.05 - band) { wasUp = false; }
+
+      if (wasDown) return 'down';
+      if (wasUp)   return 'up';
+      return 'straight';
+    }
+
+    function classifyProximity(z) {
+      if (PARAMS.calibNoseZ != null) {
+        const dz = z - PARAMS.calibNoseZ;
+        if (!wasClose && dz <= PARAMS.closeEnter) { wasClose = true; wasFar = false; return '顔が近い'; }
+        if (wasClose && dz >= PARAMS.closeExit)   { wasClose = false; }
+        if (!wasFar && dz >= PARAMS.farEnter)     { wasFar = true; wasClose = false; return '顔が遠い'; }
+        if (wasFar && dz <= PARAMS.farExit)       { wasFar = false; }
+        if (wasClose) return '顔が近い';
+        if (wasFar)   return '顔が遠い';
+        return '通常距離';
+      } else {
+        const close = PARAMS.absCloseEnter, far = PARAMS.absFarEnter, band = PARAMS.absZExitBand;
+        if (!wasClose && z < close) { wasClose = true; wasFar = false; return '顔が近い'; }
+        if (wasClose && z > close + band) { wasClose = false; }
+        if (!wasFar && z > far) { wasFar = true; wasClose = false; return '顔が遠い'; }
+        if (wasFar && z < far - band) { wasFar = false; }
+        if (wasClose) return '顔が近い';
+        if (wasFar)   return '顔が遠い';
+        return '通常距離';
+      }
+    }
+
+    // ★ 最終判定（端末角度も考慮）
+    function isBent(dir, prox, pitchAbs){
+      if (prox === '顔が近い' && pitchAbs <= 30) return true;
+      if (pitchAbs <= 40) return (dir === 'down' || dir === 'straight');
+      return (dir === 'down');
+    }
+
+    // ★ 修正：表示は毎フレーム同期。顔が見えていれば bentState の内容で常に上書き。
+    function updateSustain(isNow){
+      const t = performance.now();
+      if (isNow) {
+        if (enterStart == null) enterStart = t;
+        exitStart = null;
+        const elapsed = t - enterStart;
+        if (!bentState && elapsed >= PARAMS.sustainMs) {
+          bentState = true;
+          setWarning(true, '首が曲がっています'); // 入口で1回
+          startBeepLoop(); // ★ 追加：一定間隔でビープ開始
+        }
+      } else {
+        if (exitStart == null) exitStart = t;
+        enterStart = null;
+        const elapsed = t - exitStart;
+        if (bentState && elapsed >= PARAMS.clearMs) {
+          bentState = false;
+          setWarning(false, '首は曲がっていません'); // 退出で1回
+          stopBeepLoop(); // ★ 追加：停止
+        }
+      }
+
+      // ★ 毎フレーム：顔が見えている間は最新状態を反映
+      if (faceDetected) {
+        setWarning(bentState, bentState ? '首が曲がっています' : '首は曲がっていません');
+      }
+    }
+
+    // 任意で即時更新したいとき用
+    function refreshWarningNow(){
+      if (!faceDetected) return;
+      setWarning(bentState, bentState ? '首が曲がっています' : '首は曲がっていません');
+    }
+
+    function setWarning(bad, text){
+      if (text === lastWarnText && bad === lastWarnBad) return;
+      lastWarnText = text; lastWarnBad = bad;
+      warning.textContent = text;
+      warning.className = bad ? 'bad' : 'ok';
+    }
+
+    async function initCamera(){
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: {ideal: 640}, height: {ideal: 480} },
+        audio: false
+      });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadedmetadata = r);
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    }
+
+    async function startAll(){
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+        try {
+          const res = await DeviceOrientationEvent.requestPermission();
+          if (res === 'granted') window.addEventListener('deviceorientation', handleOrientation);
+          else { output.textContent = 'センサーの利用が許可されませんでした。'; return; }
+        } catch { output.textContent = 'センサー許可でエラーが発生しました。'; return; }
+      } else {
+        window.addEventListener('deviceorientation', handleOrientation);
+      }
+
+      await initCamera();
+
+      // ★ 追加：ユーザー操作直後にオーディオを有効化（iOS自動再生制限対策）
+      ensureAudio();
+
+      camera = new Camera(video, {
+        onFrame: async () => {
+          const t = performance.now();
+          if (t - lastInferenceTs >= 100) {
+            await faceMesh.send({ image: video });
+          }
+        },
+        width: 640, height: 480
+      });
+      camera.start();
+
+      startBtn.disabled = true; calibBtn.disabled = false; resetBtn.disabled = false;
+
+      const saved = loadCalibration();
+      if (saved) {
+        PARAMS.calibYdiff = saved.y; PARAMS.calibNoseZ = saved.z;
+        setWarning(false, '測定中...');
+      } else {
+        setWarning(false, '測定中...');
+      }
+
+      // タブ非表示で一時停止／復帰
+      document.addEventListener('visibilitychange', () => {
+        if (!camera) return;
+        if (document.hidden) {
+          try { camera.stop(); } catch {}
+          // ★ 追加：バックグラウンドで鳴りっぱなし防止
+          stopBeepLoop();
+        } else {
+          try { camera.start(); } catch {}
+        }
+      }, { passive: true });
+    }
+
+    function calibrate(){
+      if (sYdiff == null || sNoseZ == null) return;
+      PARAMS.calibYdiff = sYdiff; PARAMS.calibNoseZ = sNoseZ;
+      saveCalibration(PARAMS.calibYdiff, PARAMS.calibNoseZ);
+      setWarning(false, 'ニュートラルを登録しました');
+    }
+
+    function resetCalibration(){
+      PARAMS.calibYdiff = null; PARAMS.calibNoseZ = null;
+      localStorage.removeItem('posture-calib');
+      setWarning(false, 'キャリブを解除しました');
+    }
+
+    function saveCalibration(y, z){ try { localStorage.setItem('posture-calib', JSON.stringify({ y, z })); } catch {} }
+    function loadCalibration(){ try { return JSON.parse(localStorage.getItem('posture-calib')); } catch { return null; } }
+
+    // ============================== ログ保存（IndexedDB）＆可視化 ==============================
+    const DB_NAME = 'posture-db';
+    const STORE = 'logs';
+    let db = null;
+
+    function openDB(){
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          const _db = e.target.result;
+          if (!_db.objectStoreNames.contains(STORE)) {
+            const os = _db.createObjectStore(STORE, { keyPath: 'ts' });
+            os.createIndex('day', 'day', { unique: false });
+            os.createIndex('day_hour', ['day','hour'], { unique: false });
+          }
+        };
+        req.onsuccess = () => { db = req.result; resolve(db); };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    function ymdFromTs(ts){
+      const d = new Date(ts);
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${day}`;
+    }
+
+    // ★ JST(+09:00) の ISO風文字列（ミリ秒付き）
+    function toJstIso(ts){
+      const d = new Date(ts);
+      const parts = Object.fromEntries(
+        new Intl.DateTimeFormat('sv-SE', {
+          timeZone: 'Asia/Tokyo',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hour12: false
+        }).formatToParts(d).map(p => [p.type, p.value])
+      );
+      const ms = String(d.getMilliseconds()).padStart(3,'0');
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}.${ms}+09:00`;
+    }
+
+    let LOGGING = false;
+    let logBuffer = [];
+    let lastFlush = 0;
+    const LOG_INTERVAL_MS = 1000;
+    const FLUSH_MS = 5000;
+    let lastLogAt = 0;
+
+    async function addLogSample(){
+      if (!LOGGING) return;
+      const now = performance.now();
+      if (now - lastLogAt < LOG_INTERVAL_MS) return;
+      lastLogAt = now;
+
+      const ts = Date.now();
+      const d = new Date(ts);
+      const entry = {
+        ts,
+        day: ymdFromTs(ts),
+        hour: d.getHours(),
+        pitch: sPitch, roll: sRoll,
+        y: sYdiff, z: sNoseZ,
+        dir: faceState.dir,
+        prox: faceState.prox,
+        bent: !!bentState
+      };
+      logBuffer.push(entry);
+
+      if (ts - lastFlush >= FLUSH_MS) {
+        await flushLogs();
+      }
+    }
+
+    async function flushLogs(){
+      if (!db || logBuffer.length === 0) return;
+      const tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      for (const e of logBuffer) store.put(e);
+      await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+      logBuffer = [];
+      lastFlush = Date.now();
+    }
+
+    async function exportCSV(){
+      await flushLogs();
+      if (!db) await openDB();
+
+      const tx = db.transaction(STORE, 'readonly');
+      const store = tx.objectStore(STORE);
+      const rows = [['ts','iso','day','hour','pitch','roll','y','z','dir','prox','bent']];
+      const req = store.openCursor();
+      await new Promise((resolve, reject) => {
+        req.onsuccess = (e) => {
+          const cur = e.target.result;
+          if (!cur) return resolve();
+          const v = cur.value;
+          rows.push([
+            v.ts,
+            toJstIso(v.ts), // ★ JST で出力
+            v.day,
+            v.hour,
+            v.pitch?.toFixed?.(3),
+            v.roll?.toFixed?.(3),
+            v.y?.toFixed?.(5),
+            v.z?.toFixed?.(5),
+            v.dir,
+            v.prox,
+            v.bent ? 1 : 0
+          ]);
+          cur.continue();
+        };
+        req.onerror = () => reject(req.error);
+      });
+
+      const csv = rows.map(r => r.join(',')).join('\n');
+      const blob = new Blob([csv], {type:'text/csv'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+      a.href = url; a.download = `posture_logs_${stamp}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    async function clearAllLogs(){
+      if (!db) await openDB();
+      await flushLogs();
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).clear();
+      await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+      setWarning(false, 'ログを全削除しました');
+    }
+
+    async function visualize(){
+      if (!db) await openDB();
+      await flushLogs();
+
+      const dateInput = document.getElementById('vizDate');
+      const rangeSel  = document.getElementById('vizRange').value; // 'day' | 'week'
+      const baseDay = dateInput.value || ymdFromTs(Date.now());
+
+      const chart = document.getElementById('chart');
+      const ctxc  = chart.getContext('2d');
+      ctxc.clearRect(0,0,chart.width,chart.height);
+
+      const buckets = Array.from({length:24}, () => ({bentMs:0,totalMs:0}));
+
+      const startDate = new Date(baseDay+'T00:00:00');
+      const endDate = new Date(startDate);
+      if (rangeSel === 'day') endDate.setDate(endDate.getDate()+1);
+      else endDate.setDate(endDate.getDate()+7);
+
+      const tx = db.transaction(STORE,'readonly');
+      const store = tx.objectStore(STORE);
+      const idx = store.index('day');
+
+      for (let d=new Date(startDate); d<endDate; d.setDate(d.getDate()+1)) {
+        const dayStr = ymdFromTs(d.getTime());
+        const dayReq = idx.getAll(dayStr);
+        // eslint-disable-next-line no-await-in-loop
+        const entries = await new Promise((res,rej)=>{ dayReq.onsuccess=()=>res(dayReq.result||[]); dayReq.onerror=()=>rej(dayReq.error); });
+        if (entries.length === 0) continue;
+
+        entries.sort((a,b)=>a.ts-b.ts);
+        for (let i=0;i<entries.length;i++){
+          const cur = entries[i];
+          const next = entries[i+1];
+          const dt = Math.min((next ? next.ts - cur.ts : LOG_INTERVAL_MS), LOG_INTERVAL_MS*5);
+          const h = cur.hour;
+          buckets[h].totalMs += dt;
+          if (cur.bent) buckets[h].bentMs += dt;
+        }
+      }
+
+      const perc = buckets.map(b => (b.totalMs>0 ? Math.round(100*b.bentMs/b.totalMs) : 0));
+      drawBarChart(ctxc, perc);
+
+      chart.onclick = (ev) => {
+        const i = hitBar(ev.offsetX, ev.offsetY, chart, perc.length);
+        if (i != null) {
+          const p = perc[i];
+          setWarning(p>=50, `${i}時台の前傾割合: ${p}%`);
+        }
+      };
+    }
+
+    function drawBarChart(ctx, data){
+      const W = ctx.canvas.width, H = ctx.canvas.height;
+      ctx.clearRect(0,0,W,H);
+      const padL=36, padR=8, padT=10, padB=24;
+      const innerW = W - padL - padR;
+      const innerH = H - padT - padB;
+      const n = data.length;
+      const barGap = 4;
+      const barW = Math.floor((innerW - (n-1)*barGap) / n);
+
+      // 軸
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#ccc';
+      ctx.beginPath();
+      ctx.moveTo(padL, padT);
+      ctx.lineTo(padL, padT+innerH);
+      ctx.lineTo(padL+innerW, padT+innerH);
+      ctx.stroke();
+
+      // 目盛り
+      ctx.fillStyle = '#666';
+      ctx.font = '12px system-ui, -apple-system, sans-serif';
+      for (const yv of [0,25,50,75,100]){
+        const y = padT + innerH - innerH*yv/100;
+        ctx.strokeStyle = '#eee';
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL+innerW, y); ctx.stroke();
+        ctx.fillStyle = '#666';
+        ctx.fillText(String(yv), 4, y+4);
+      }
+
+      // 棒
+      ctx.fillStyle = '#0ea5e9';
+      const bars = [];
+      for (let i=0;i<n;i++){
+        const x = padL + i*(barW+barGap);
+        const h = Math.round(innerH * data[i]/100);
+        const y = padT + innerH - h;
+        ctx.fillRect(x, y, barW, h);
+        if (h>14){
+          ctx.fillStyle = '#111';
+          ctx.font = '12px system-ui, -apple-system, sans-serif';
+          ctx.fillText(`${data[i]}%`, x+2, y-2);
+          ctx.fillStyle = '#0ea5e9';
+        }
+        bars.push([x,y,barW,h]);
+        ctx.fillStyle = '#444';
+        ctx.font = '11px system-ui, -apple-system, sans-serif';
+        ctx.fillText(String(i), x+Math.max(0,barW-10)/2, padT+innerH+14);
+        ctx.fillStyle = '#0ea5e9';
+      }
+      ctx.canvas._bars = bars;
+    }
+
+    function hitBar(px, py, canvas, n){
+      const bars = canvas._bars || [];
+      for (let i=0;i<bars.length;i++){
+        const [x,y,w,h] = bars[i];
+        if (px>=x && px<=x+w && py>=y && py<=y+h) return i;
+      }
+      return null;
+    }
+
+    // ========== UI配線 ==========
+    window.addEventListener('load', async () => {
+      await openDB();
+
+      const vizDate = document.getElementById('vizDate');
+      if (vizDate) vizDate.value = ymdFromTs(Date.now());
+
+      startBtn.addEventListener('click', startAll);
+      calibBtn.addEventListener('click', calibrate);
+      resetBtn.addEventListener('click', resetCalibration);
+
+      const logStartBtn  = document.getElementById('logStartBtn');
+      const logStopBtn   = document.getElementById('logStopBtn');
+      const exportCsvBtn = document.getElementById('exportCsvBtn');
+      const clearLogBtn  = document.getElementById('clearLogBtn');
+      const vizBtn       = document.getElementById('vizBtn');
+
+      if (logStartBtn) logStartBtn.addEventListener('click', async ()=>{
+        LOGGING = true; lastLogAt = 0; lastFlush = 0;
+        // setWarning は使わない（表示を壊さない）
+        output.textContent += '\n[LOG] ログ記録を開始しました';
+        logStartBtn.disabled = true; logStopBtn.disabled  = false;
+      });
+
+      if (logStopBtn) logStopBtn.addEventListener('click', async ()=>{
+        LOGGING = false; await flushLogs();
+        // setWarning は使わない（表示を壊さない）
+        output.textContent += '\n[LOG] ログ記録を停止しました';
+        logStartBtn.disabled = false; logStopBtn.disabled  = true;
+      });
+
+      if (exportCsvBtn) exportCsvBtn.addEventListener('click', exportCSV);
+      if (clearLogBtn)  clearLogBtn.addEventListener('click', clearAllLogs);
+      if (vizBtn)       vizBtn.addEventListener('click', visualize);
+
+      // 初回の空グラフ
+      const chart = document.getElementById('chart');
+      if (chart) {
+        const ctx = chart.getContext('2d');
+        drawBarChart(ctx, Array(24).fill(0));
+      }
+    });
+  </script>
+</body>
+</html>
