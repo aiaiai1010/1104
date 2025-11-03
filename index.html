@@ -3,31 +3,133 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>スマートフォン姿勢判定（1）</title>
+  <title>スマートフォン姿勢判定＋YouTube音あり再生</title>
   <style>
     :root { --w: 240px; --h: 320px; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans JP", "Apple Color Emoji", "Segoe UI Emoji";
-      font-size: 18px; margin: 0; color: #111; background: #fafafa; }
-    header { padding: 12px 16px; background: #fff; border-bottom: 1px solid #eee; position: sticky; top: 0; z-index: 10; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans JP", "Apple Color Emoji", "Segoe UI Emoji";
+      font-size: 18px;
+      margin: 0;
+      color: #111;
+      background: #fafafa;
+    }
+    header {
+      padding: 12px 16px;
+      background: #fff;
+      border-bottom: 1px solid #eee;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
     h1 { font-size: 20px; margin: 0; }
-    main { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 12px; place-items: center; }
-    .stage { display: flex; flex-direction: column; gap: 8px; align-items: center; }
-    .pair { display: flex; gap: 8px; align-items: center; justify-content: center; flex-direction: row; }
-    video, canvas { transform: scaleX(-1); width: var(--w); height: var(--h);
-      border: 1px solid #ddd; background: #000; border-radius: 6px; }
-    .controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
-    button { font-size: 15px; padding: 8px 14px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
-    button.primary { background: #0ea5e9; color: #fff; border-color: #0ea5e9; }
+    main {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      padding: 12px;
+      place-items: center;
+    }
+    .stage {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+    }
+    .pair {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+      flex-direction: row;
+    }
+    video, canvas {
+      transform: scaleX(-1);
+      width: var(--w);
+      height: var(--h);
+      border: 1px solid #ddd;
+      background: #000;
+      border-radius: 6px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+    }
+    button {
+      font-size: 15px;
+      padding: 8px 14px;
+      border-radius: 10px;
+      border: 1px solid #ccc;
+      background: #fff;
+      cursor: pointer;
+    }
+    button.primary {
+      background: #0ea5e9;
+      color: #fff;
+      border-color: #0ea5e9;
+    }
     button:disabled { opacity: .6; cursor: not-allowed; }
-    .panel { width: min(680px, 92vw); background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 12px; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-line; }
-    #warning { font-size: 24px; font-weight: 800; text-align: center; margin: 4px 0 0; }
-    .ok { color: #16a34a; } .bad { color: #dc2626; }
+    .panel {
+      width: min(680px, 92vw);
+      background: #fff;
+      border: 1px solid #eee;
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-line;
+    }
+    #warning {
+      font-size: 24px;
+      font-weight: 800;
+      text-align: center;
+      margin: 4px 0 0;
+    }
+    .ok { color: #16a34a; }
+    .bad { color: #dc2626; }
     .hint { color: #666; font-size: 13px; }
-    .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#f1f5f9; font-size:12px; }
-    @media (max-width: 760px) { .pair { flex-direction: column; flex-wrap: nowrap; } }
+    .badge {
+      display:inline-block;
+      padding:2px 8px;
+      border-radius:999px;
+      background:#f1f5f9;
+      font-size:12px;
+    }
+    @media (max-width: 760px) {
+      .pair { flex-direction: column; flex-wrap: nowrap; }
+    }
     #canvas { display: none; }
+
+    /* ▼ YouTube用スタイル追加 ▼ */
+    input[type="url"] {
+      width: min(400px, 90vw);
+      padding: 8px;
+      font-size: 16px;
+      box-sizing: border-box;
+    }
+    .yt-controls {
+      margin-top: 8px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    iframe {
+      width: 100%;
+      max-width: 640px;
+      aspect-ratio: 16/9;
+      border: none;
+      border-radius: 8px;
+      background: #000;
+    }
   </style>
 </head>
 <body>
@@ -36,6 +138,7 @@
   </header>
 
   <main>
+    <!-- 姿勢判定ステージ -->
     <section class="stage">
       <div class="controls">
         <button id="startBtn" class="primary">測定開始</button>
@@ -48,6 +151,7 @@
       </div>
     </section>
 
+    <!-- 姿勢判定・ログ・可視化パネル -->
     <section class="panel">
       <div id="warning" class="ok">測定待機中</div>
       <div class="row">
@@ -56,7 +160,10 @@
           <div id="output" class="mono">読み取り中...</div>
         </div>
       </div>
-      <p class="hint">使い方：<strong>測定開始</strong> → 個人差が出る場合は正しい姿勢で <strong>基準ボタン</strong> → 不要なら <strong>解除</strong>。iOS は開始時にセンサー許可が必要です。</p>
+      <p class="hint">
+        使い方：<strong>測定開始</strong> → 個人差が出る場合は正しい姿勢で <strong>基準ボタン</strong> →
+        不要なら <strong>解除</strong>。iOS は開始時にセンサー許可が必要です。
+      </p>
 
       <!-- ▼ ログ操作＆可視化UI ▼ -->
       <div class="controls" style="margin-top:6px">
@@ -73,7 +180,7 @@
             <label class="hint">日付:
               <input type="date" id="vizDate">
             </label>
-            <label class="hint">対象: 
+            <label class="hint">対象:
               <select id="vizRange">
                 <option value="day" selected>1日</option>
                 <option value="week">直近7日</option>
@@ -81,12 +188,31 @@
             </label>
             <button id="vizBtn">更新</button>
           </div>
-          <canvas id="chart" width="640" height="220" style="width:100%; max-width:680px; background:#fff; border:1px solid #eee; border-radius:8px; margin-top:6px"></canvas>
+          <canvas id="chart" width="640" height="220"
+                  style="width:100%; max-width:680px; background:#fff; border:1px solid #eee; border-radius:8px; margin-top:6px"></canvas>
           <div class="hint">バー高さ=前傾割合（%）。棒をタップで時間帯の%を表示。</div>
         </div>
       </div>
       <!-- ▲ ログ操作＆可視化UI ▲ -->
     </section>
+
+    <!-- ▼ YouTube 音あり再生パネル ▼ -->
+    <section class="panel">
+      <h3>YouTube音あり再生テスト</h3>
+      <div class="yt-controls">
+        <input id="ytUrl" type="url" placeholder="YouTubeのURLを貼り付け">
+        <button id="loadYtBtn">読み込み</button>
+      </div>
+      <iframe id="ytPlayer"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowfullscreen></iframe>
+      <p class="hint">
+        🔊 「読み込み」ボタンを押すと音付きで自動再生を試みます。<br>
+        iPhoneやSafariでは自動再生が無音または停止する場合があります。<br>
+        その場合はプレイヤーの ▶ ボタンを押すと音が出ます。
+      </p>
+    </section>
+    <!-- ▲ YouTube 音あり再生パネル ▲ -->
   </main>
 
   <!-- MediaPipe -->
@@ -675,6 +801,25 @@
       return null;
     }
 
+    // ========== YouTube URL 解析関数 ==========
+    function parseYouTube(urlStr) {
+      try {
+        const u = new URL(urlStr);
+        const host = u.hostname.replace(/^www\./, '');
+        let id = null;
+        if (host === 'youtube.com' || host === 'm.youtube.com') {
+          if (u.pathname === '/watch') id = u.searchParams.get('v');
+          else if (u.pathname.startsWith('/shorts/')) id = u.pathname.split('/')[2];
+          else if (u.pathname.startsWith('/live/'))   id = u.pathname.split('/')[2];
+        } else if (host === 'youtu.be') {
+          id = u.pathname.slice(1);
+        }
+        return id;
+      } catch {
+        return null;
+      }
+    }
+
     // ========== UI配線 ==========
     window.addEventListener('load', async () => {
       await openDB();
@@ -682,6 +827,7 @@
       const vizDate = document.getElementById('vizDate');
       if (vizDate) vizDate.value = ymdFromTs(Date.now());
 
+      // 姿勢判定ボタン
       startBtn.addEventListener('click', startAll);
       calibBtn.addEventListener('click', calibrate);
       resetBtn.addEventListener('click', resetCalibration);
@@ -715,6 +861,23 @@
       if (chart) {
         const ctx = chart.getContext('2d');
         drawBarChart(ctx, Array(24).fill(0));
+      }
+
+      // ▼ YouTube プレイヤー配線 ▼
+      const ytUrl = document.getElementById('ytUrl');
+      const loadYtBtn = document.getElementById('loadYtBtn');
+      const ytPlayer = document.getElementById('ytPlayer');
+
+      if (loadYtBtn && ytUrl && ytPlayer) {
+        loadYtBtn.addEventListener('click', () => {
+          const id = parseYouTube(ytUrl.value.trim());
+          if (!id) {
+            alert("URLを正しく認識できませんでした");
+            return;
+          }
+          // 音付き自動再生を試す
+          ytPlayer.src = `https://www.youtube.com/embed/${id}?autoplay=1&rel=0`;
+        });
       }
     });
   </script>
